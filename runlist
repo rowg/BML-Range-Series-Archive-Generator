@@ -1,0 +1,74 @@
+#!/usr/bin/env perl
+#runlist
+# see readme
+
+
+sub usage()
+{
+	print "Usage: $0 site archive filelist\n" ;
+	print "Builds archive for given site from filelist\n" ;
+}
+
+
+sub main()
+{
+	my $argc = scalar @ARGV ;
+	if( $argc != 3 )
+	{
+		usage() ;
+		return 1 ;
+	}
+	my $site = $ARGV[0] ;
+	my $archive = $ARGV[1] ;
+	my $filelist = $ARGV[2] ;
+	my $total = int(`cat $filelist | wc -l`) ;
+	my $count = 0 ;
+	if( ! -e $filelist )
+	{
+		print "File $file does not exist.\n" ;
+		return 1 ;
+	}
+	if( ! -d $archive )
+	{
+		print "Archive directory $archive does not exist.\n" ;
+		return 1 ;
+	}
+	my $fd ;
+	if( not defined open($fd,"<"."$filelist") )
+	{
+		print "Cannot open file '$filelist'.\n" ;
+		return 1 ;
+	}
+	my $line ;
+	while( $line = <$fd> )
+	{
+		chomp($line) ;
+		if( $line eq "" ) { next ; }
+		$count += 1 ;
+		my $progress = 100*$count/$total ;
+		my $command = "./build $site \"$archive\" \"$line\"" ;
+		print "$command\n" ;
+		my $result = `$command` ;
+		my $retval = $? ;
+		print "$result\n" ;
+		if( $retval != 0 )
+		{
+			my $message = "" ;
+			$message = "$command\n" ;
+			$message += "$result\n" ;
+			$message += "$retval\n" ;
+			my $logfd ;
+			if( defined open($logfd,">>"."logfile") )
+			{
+				print $logfd $message ;
+				close($logfd) ;
+			}
+		}
+		print "Progress: $progress $count/$total\n" ;
+	}
+	close($fd) ;
+	return 0 ;
+}
+
+exit main() ;
+#END

@@ -1,0 +1,495 @@
+#!/usr/bin/env perl
+#regroup
+
+# see readme
+# calls (shell),find, mkdir, cp, md5
+# TODO group by local day
+# TODO Keep latest daily only, avoid _ suffix
+# TODO Backfill missing config files from 'early' directories
+
+use strict ;
+use warnings ;
+use File::Basename ;
+use File::Path ;
+use Date::Calc qw(Add_Delta_Days) ;
+
+my $SortDir = "sortdir" ;	# the subdirectory containing all unsorted config files
+my $ConfigDir = "Configs" ;	# the subdirectory containing all sorted config files
+my $RangeDir = "RangeSeries" ;	# the subdirectory containing all sorted RangeSeries files
+my $DebugFilename = "debug.txt" ;
+my $DebugFile = undef ;
+my $Debug = 1 ;			# Flag to turn on debug output to DebugFilename
+
+sub usage
+{
+	print "\nUsage: $0 archive\n\n" ;
+	print "Searches for configuration files in archive/$SortDir, groups them by date\n" ;
+	print " and then copies them into dated subdirectories under archive/$ConfigDir.\n" ;
+}
+
+sub main
+{
+	my $argc = scalar @ARGV ;
+	if( $argc != 1 )
+	{
+		usage() ;
+		print "Bad number of parameters: got $argc, was expecting 1\n" ;
+		return 1 ;
+	}
+	my $archive_root = $ARGV[0] ;
+	if( not -d "$archive_root" )
+	{
+		print "Not a directory: $archive_root\n" ;
+		return 1 ;
+	}
+	if( not defined open($DebugFile,">",$DebugFilename) )
+	{
+		print "Warning: cannot write to debug file '$DebugFilename'\n" ;
+	}
+	my $err = sortarchive($archive_root) ;
+	if( $DebugFile )
+	{
+		close($DebugFile) ;
+	}
+	return $err ;
+}
+
+sub today()
+{
+	my @tm = gmtime(time()) ;
+	my $year = $tm[5]+1900 ;
+	my $month = $tm[4]+1 ;
+	my $day = $tm[3]+1 ;
+	my $date = sprintf("%4d%02d%02d",$year,$month,$day) ;
+	return $date ;
+}
+
+sub sortarchive($)
+{
+	my ( $path ) = @_ ;
+	my @configlist = () ;	# A list of config files that needs to be processed together
+	my $configpath = undef ;
+	my $lastsite = undef ;
+	my $rsfirstdate = "20990101" ; # all valid dates are 'less' than this
+	my $rslastdate = "0" ; # all valid dates are 'greater' than this
+	my $configfirstdate = "20990101" ; # all valid dates are 'less' than this
+	my $configlastdate = "0" ; # all valid dates are 'greater' than this
+	my $fd = makefilelist($path) ;	# a temporary file containing all config files
+	if( not defined $fd ) { return 1 ; }
+	my $err = 0 ;
+	# read list of files one at a time
+	while( my $line = <$fd> )
+	{
+		chomp($line) ;
+		if( $DebugFile ) { print $DebugFile "sortarchive: line='$line'\n" ; }
+		my ( $err, $root, $site, $dirname, $date, $filename ) ;
+		# check for range series file
+		( $err, $root, $site, $date ) = parserange($line,$RangeDir) ;
+		if( ! $err )
+		{
+			if( $date < $rsfirstdate )
+			{
+				$rsfirstdate = $date ;
+				if( $DebugFile ) { print $DebugFile "sortarchive: rsfirstdate=$rsfirstdate\n" ; }
+			}
+			if( $date > $rslastdate )
+			{
+				$rslastdate = $date ;
+				if( $DebugFile ) { print $DebugFile "sortarchive: rslastdate=$rslastdate\n" ; }
+			}
+			next ;
+		}
+		# check for config file
+		( $err, $root, $site, $dirname, $date, $filename ) = parseconfig($line,$SortDir) ;
+		if( ! $err )
+		{
+			if( $date < $configfirstdate )
+			{
+				$configfirstdate = $date ;
+				if( $DebugFile ) { print $DebugFile "sortarchive: configfirstdate=$configfirstdate\n" ; }
+			}
+			if( $date > $configlastdate )
+			{
+				$configlastdate = $date ;
+				if( $DebugFile ) { print $DebugFile "sortarchive: configlastdate=$configlastdate\n" ; }
+			}
+		}
+		if( $err ) { next ; }
+		$configpath = "$root/$site/$ConfigDir" ;
+		# create a hash for parsed fields
+		my $configdata = { date => $date, dir => $dirname, file => $filename, path => $line } ;
+		# check if the entry is in a new site group
+		if( (defined $lastsite) && ($lastsite ne $site) )
+		{
+			$err = sortlist(\@configlist,$configpath,$configfirstdate,$configlastdate,$rsfirstdate,$rslastdate) ;	# fixup the config files
+			@configlist = () ;	# reset the list of config files for the next site
+			$configfirstdate = "20990101" ; # all valid dates are 'less' than this
+			$configlastdate = "0" ; # all valid dates are 'greater' than this
+			if( $err ) { last ; }
+		}
+		push @configlist, $configdata ;
+		$lastsite = $site ;
+	}
+	if( scalar @configlist > 0 )
+	{
+		if( $DebugFile ) { print $DebugFile "sortarchive: configpath='$configpath'\n" ; }
+		$err = sortlist(\@configlist,$configpath,$configfirstdate,$configlastdate,$rsfirstdate,$rslastdate) ;		# fixup the config files
+	}
+	close($fd) ;
+	if( $err )
+	{
+		print "Error fixing up '$configpath'\n" ;
+		return 1 ;
+	}
+	return 0 ;
+}
+
+sub makefilelist($)	# creates a file in /tmp containing a list of all files in the archive, opens the file and returns a handle
+{
+	my ( $path ) = @_ ;
+	# Build a list of files under the archive root
+	my $tempfilename = "/tmp/filelist.$$" ;
+	if( $DebugFile ) { print $DebugFile "makefilelist: tempfilename='$tempfilename'\n" ; }
+	my $command = "find \"$path\" -type f >$tempfilename" ;
+	my $result = `$command` ;
+	if( $? )
+	{
+		print "Error running command: '$command'\n" ;
+		return undef ;
+	}
+	if( ! -e $tempfilename )
+	{
+		print "Cannot create file list in '$tempfilename'\n" ;
+		return undef ;
+	}
+	if( -z $tempfilename )
+	{
+		print "No files found in '$path'\n" ;
+		return undef ;
+	}
+	my $fd = undef ;
+	if( not defined open($fd,"<",$tempfilename) )
+	{
+		print "Error opening temporary file '$tempfilename'\n" ;
+		return undef ;
+	}
+	return $fd ;
+}
+
+sub parserange($$)	# parses root, site, date and file from path, eg test/BML1/RangSeries/2010/06/19/*
+{
+	my ( $line, $matchdir ) = @_ ;
+	my ( $rootname, $site, $year, $month, $day, $date ) = undef ;
+	if( $line =~ m/^(.+)\/([^\/]+?)\/$matchdir\/(\d{4})\/(\d{2})\/(\d{2})\// )	# (root)/(site)/$matchdir/(year)/(mo)/(dy)/*
+	{
+		$rootname = $1 ;
+		$site = $2 ;
+		$year = $3 ;
+		$month = $4 ;
+		$day = $4 ;
+	}
+	else
+	{
+		if( $DebugFile ) { print $DebugFile "parserange: no match\n" ; }
+		return 1 ;
+	}
+	if( (not defined $rootname) || ($rootname eq "") )
+	{
+		print "Cannot parse root name, skipping '$line'\n" ;
+		return 1 ;
+	}
+	if( (not defined $site) || ($site eq "") )
+	{
+		print "Cannot parse site name, skipping '$line'\n" ;
+		return 1 ;
+	}
+	if( (not defined $year) || ($year eq "") || ($year == 0) )
+	{
+		print "Cannot parse year, skipping '$line'\n" ;
+		return 1 ;
+	}
+	if( (not defined $month) || ($month eq "") || ($month == 0) )
+	{
+		print "Cannot parse month, skipping '$line'\n" ;
+		return 1 ;
+	}
+	if( (not defined $day) || ($day eq "") || ($day == 0) )
+	{
+		print "Cannot parse day, skipping '$line'\n" ;
+		return 1 ;
+	}
+	$date = "$year$month$day" ;
+	if( $DebugFile ) { print $DebugFile "parserange: rootname='$rootname' site='$site' date='$date'\n" ; }
+	return ( 0, $rootname, $site, $date ) ;	# first parameter is error code, 0:allOK
+}
+
+sub parseconfig($$)	# parses root, site, dir, dir date and file from path, eg test/BML1/SortDir/AnalysisOptions_2010_06_19/AnalysisOptions.txt
+{
+	my ( $line, $matchdir ) = @_ ;
+	my ( $rootname, $site, $dirname, $filename, $date ) = undef ;
+	if( $line =~ m/^(.+)\/([^\/]+?)\/$matchdir\/([^\/]+?)\/(.+)$/ )	# (root)/(site)/$matchdir/(dir)/(file)
+	{
+		$rootname = $1 ;
+		$site = $2 ;
+		$dirname = $3 ;
+		$filename = $4 ;
+	}
+	else
+	{
+		if( $DebugFile ) { print $DebugFile "parseconfig: no match\n" ; }
+		return 1 ;
+	}
+	if( (not defined $rootname) || ($rootname eq "") )
+	{
+		print "Cannot parse root name, skipping '$line'\n" ;
+		return 1 ;
+	}
+	if( (not defined $site) || ($site eq "") )
+	{
+		print "Cannot parse site name, skipping '$line'\n" ;
+		return 1 ;
+	}
+	if( (not defined $dirname) || ($dirname eq "") )
+	{
+		print "Cannot parse dir name, skipping '$line'\n" ;
+		return 1 ;
+	}
+	if( (not defined $filename) || ($filename eq "") )
+	{
+		print "Cannot parse file name, skipping '$line'\n" ;
+		return 1 ;
+	}
+	$date = getdate($dirname) ;	# AnalysisOptions_2010_06_19/AnalysisOptions.txt -> 2010-06-09
+	if( not defined $date )
+	{
+		print "Cannot parse directory date, skipping '$line'\n" ;
+		return 1 ;
+	}
+	if( $DebugFile ) { print $DebugFile "parseconfig: rootname='$rootname' site='$site' dirname='$dirname' date='$date' filename='$filename'\n" ; }
+	return ( 0, $rootname, $site, $dirname, $date, $filename ) ;	# first parameter is error code, 0:allOK
+}
+
+sub sortlist($$$$$$)
+{
+	my ( $configlist, $path, $configfirstdate, $configlastdate, $rsfirstdate, $rslastdate ) = @_ ;
+	print "debug: sortlist: configfirstdate=$configfirstdate configlastdate=$configlastdate rsfirstdate=$rsfirstdate rslastdate=$rslastdate\n" ;
+	if( checkdate($configlastdate) ) { return 1 ; }
+	if( checkdate($rsfirstdate) ) { return 1 ; }
+	if( checkdate($rslastdate) ) { return 1 ; }
+	# scan the configlist for dates to build a date list
+	if( $DebugFile ) { print $DebugFile "sortlist: path='$path'\n" ; }
+	# build a list of config file dates
+	my %datelist = () ;
+	for my $entry ( @$configlist )
+	{
+		my $date = $entry->{date} ;
+		if( $date > $rslastdate ) { next ; }	# don't process config files posterior to range series
+		$datelist{$date} = "" ;	# only really need the date, collisions ignored
+		my $dir = $entry->{dir} ;
+		my $file = $entry->{file} ;
+		my $path = $entry->{path} ;
+		if( $DebugFile ) { print $DebugFile "sortlist: date=$date dir=$dir file=$file path=$path\n" ; }
+	}
+	my $previous = $rsfirstdate ;	# take the start date from the first rangeseries
+	my @dates = sort ( keys %datelist ) ;
+	push @dates, $rslastdate ;	# create fencepost, take the end date from the last rangeseries
+	# create a subdirectory for each date interval starting at firstdate, then stuff the subdir with config files
+	for my $date ( @dates )
+	{
+		my $daybefore = daybefore($date) ;
+		my $dirname = "$path/$previous-$daybefore" ;
+		if( $DebugFile ) { print $DebugFile "sortlist: create dir '$dirname'\n" ; }
+		print "debug: sortlist: create dir '$dirname'\n" ;
+		# create subdirectory dirname
+		if( mkdirp($dirname) )
+		{
+			print "Error creating '$dirname'.\n" ;
+			return 1 ;
+		}
+		# copy all relevant config files into dirname, based on dates
+		if( collectfiles($configlist,$dirname,$previous,$date) )
+		{
+			print "Error collecting files for '$dirname'.\n" ;
+			return 1 ;
+		}
+		$previous = $date ;
+	}
+	return 0 ;
+}
+
+sub daybefore($) # return a string representing the date one day before the given date
+{
+	my ( $date ) = @_ ;
+	my $year = substr($date,0,4) ;
+	my $month = substr($date,4,2) ;
+	my $day = substr($date,6,2) ;
+	my ( $newyear, $newmonth, $newday ) = Add_Delta_Days($year,$month,$day,-1) ;
+	my $newdate = sprintf("%04d%02d%02d",$newyear,$newmonth,$newday) ;
+	return $newdate ;
+}
+
+sub collectfiles($$$$)		# stuff the given directory with suitable files from the list of all config files
+{
+	my ( $configlist, $dirname, $startdate, $enddate ) = @_ ;
+	# configlist is a list of all config files
+	# dirname is the name of the destination subdirectory for the sorted config files
+	# startdate and enddate define the date range for config files in dirname
+	if( checkdir($dirname) ) { return 1 ; }
+	if( checkdate($startdate) ) { return 1 ; }
+	if( checkdate($enddate) ) { return 1 ; }
+	my $previousfile = undef ;
+	my $bestentry = undef ;
+	for my $entry ( @$configlist )	# go through the entire list of all config files
+	{
+		my $configfiledate = $entry->{date} ;
+		my $configfilename = $entry->{file} ;
+		my $oldconfigfilename = $configfilename ;
+		$configfilename =~ s/.*_+$// ; # map potentially modified filenames to the original filename by deleting trailing '_' characters
+		if( $DebugFile ) { print $DebugFile "collectfiles: dirname=$dirname configfilename=$configfilename oldconfigfilename=$oldconfigfilename configfiledate=$configfiledate\n" ; }
+		if( (defined $previousfile) && ($previousfile ne "") && ($previousfile ne $configfilename) )
+		{
+			# the config filename just changed, so we've seen all files of this type, now trigger a copy
+			if( not defined $bestentry )
+			{
+				print "Missing candidate for '$previousfile' in $dirname.\n" ;
+				$previousfile = $configfilename ;
+				next ;
+			}
+			if( collectfile($bestentry,$dirname) )
+			{
+				return 1 ;
+			}
+			$bestentry = undef ;	# no candidate yet for this filename
+		}
+		$previousfile = $configfilename ;	# update previous for change detector
+		if( $configfiledate <= $startdate )
+		{
+			if( $DebugFile ) { print $DebugFile "collectfiles: new best entry for configfilename='$configfilename' configfiledate='$configfiledate' enddate='$enddate'\n" ; }
+			$bestentry = $entry ;
+		}
+	}
+	# deal with last file group
+	if( defined $bestentry )
+	{
+		if( collectfile($bestentry,$dirname) )
+		{
+			return 1 ;
+		}
+	}
+	return 0 ;
+}
+
+sub collectfile($$)
+{
+	my ( $bestentry, $dirname ) = @_ ;
+	if( $DebugFile ) { print $DebugFile "collectfile: copied $bestentry->{path} to $dirname\n" ; }
+	if( cpfile($bestentry->{path},$dirname) )
+	{
+		print "Error copying $bestentry->{path}\n" ;
+		return 1 ;	# you might prefer to continue, but for now let's quit
+	}
+}
+
+sub checkdir($)
+{
+	my ( $dirname ) = @_ ;
+	if( ! -e $dirname )
+	{
+		print "Directory '$dirname' does not exist\n" ;
+		return 1 ;
+	}
+	if( ! -d $dirname )
+	{
+		print "Not a directory: '$dirname'\n" ;
+		return 1 ;
+	}
+	return 0 ;
+}
+
+sub checkdate($)
+{
+	my ( $date ) = @_ ;
+	if( (not defined $date) || ($date eq "") )
+	{
+		print "Missing date value\n" ;
+		return 1 ;
+	}
+}
+
+sub getdate($)
+{
+	my ( $dirname ) = @_ ;
+	my @parts = split /_/,$dirname ;
+	#my $configname = $parts[0] ;
+	my $year = $parts[1] ;
+	if( (not defined $year) || ($year eq "") || ($year < 2000) || ($year > 2038) ) { return undef ; }
+	my $month = $parts[2] ;
+	if( (not defined $month) || ($month eq "") || ($month < 1) || ($month > 12) ) { return undef ; }
+	my $day = $parts[3] ;
+	if( (not defined $day) || ($day eq "") || ($day < 1) || ($day > 31) ) { return undef ; }
+	my $date = "$year$month$day" ;
+	return $date ;
+}
+
+sub mkdirp($)	# create directory path using mkdir with -p flag
+{
+	my ( $path ) = @_ ;
+	my $command = "mkdir -p \"$path\"" ;
+	my $result = `$command` ;
+	my $err = $? ;
+	if( $err )
+	{
+		print "Error creating $path\n" ;
+		print "$result\n" ;
+		return 1 ;
+	}
+	if( ! -d $path )
+	{
+		print "Missing path: $path\n" ;
+		return 1 ;
+	}
+	return 0 ;
+}
+
+sub cpfile($$)	# copy from source file to destination directory with -p flag
+{
+	my ( $source, $destination ) = @_ ;	# 
+	my $filename = basename($source) ;
+	if( (not defined $filename) or ($filename eq "") )
+	{
+		print "Filename missing from $source\n" ;
+		return 1 ;
+	}
+	my $destinationfile = "$destination/$filename" ;
+	my $command = "cp -p \"$source\" \"$destinationfile\"" ;
+	my $result = `$command` ;
+	my $err = $? ;
+	if( $err )
+	{
+		print "Error copying file '$source' to '$destinationfile'\n" ;
+		print "Result:$result\n" ;
+		return 1 ;
+	}
+	if( ! -f $destinationfile )
+	{
+		print "Missing destination file: '$destinationfile'\n" ;
+		return 1 ;
+	}
+	print "$source\t=>\t$destinationfile\n" ;
+	return 0 ;
+}
+
+sub getmd5($)	# uses external executable rather than yet another perl module
+{
+	my ( $filename ) = @_ ;
+	my $command = "md5 -q \"$filename\"" ;
+	my $md5 = `$command` ;
+	chomp($md5) ;
+	return $md5 ;
+}
+
+
+
+exit main ;
+
+#END

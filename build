@@ -1,0 +1,440 @@
+#!/usr/bin/env perl
+#build
+# see readme
+
+use strict ;
+use warnings ;
+use File::Basename ;
+use File::Path ;
+
+my $SortDir = "sortdir" ;	# the subdirectory containing all unsorted config files
+
+sub parse_rangeseries($$) ;
+sub archive_rangeseries($$$$) ;
+
+my @FileList =
+(	#	Name			Match Name			Parse Function			Archive Function		#
+	[	"Range Series",		'.+/Rng.+\.rs',			\&parse_rangeseries,		\&archive_rangeseries		],
+	[	"AnalysisOptions.txt",	'.+/AnalysisOptions\.txt',	\&parse_analysisoptions,	\&archive_analysisoptions	],
+	[	"Phases.txt",		'.+/Phases\.txt',		\&parse_phases,			\&archive_phases		],
+	[	"Header.txt",		'.+/Header\.txt',		\&parse_header,			\&archive_header		],
+	[	"MeasPattern.txt",	'.+/MeasPattern\.txt',		\&parse_measpattern,		\&archive_measpattern		],
+	[	"Site Log",		'.+/Site_.{3,4}\.log',		\&parse_sitelog,		\&archive_sitelog		],
+	[	"SSA plist",		'.+/SeaSondeAcquisition\.plist',\&parse_ssaplist,		\&archive_ssaplist		],
+	[	"SSC plist",		'.+/SeaSondeController\.plist',	\&parse_sscplist,		\&archive_sscplist		],
+) ;
+
+sub usage
+{
+	print "Usage: $0 site archive file\n" ;
+	print "Adds the given file to the archive, creating relevant directory structure.\n" ;
+	print "Assumes archive is the top level archive directory and file is the path to a file to be added.\n" ;
+	print "Uses site to match path and file names.\n" ;
+	print "Currently recognizes these file types:\n" ;
+	foreach my $row ( @FileList )
+	{
+		my $name = $row->[0] ;
+		print "\t$name\n" ;
+	}
+}
+
+sub main
+{
+	my $argc = scalar @ARGV ;
+	if( $argc != 3 )
+	{
+		print "Bad number of parameters: got $argc, was expecting 3\n" ;
+		usage() ;
+		return 1 ;
+	}
+	my $site = $ARGV[0] ;
+	my $archive_root = $ARGV[1] ;
+	if( not -d $archive_root )
+	{
+		print "Not a directory: $archive_root\n" ;
+		return 1 ;
+	}
+	my $file_path = $ARGV[2] ;
+	if( not -f $file_path )
+	{
+		print "Not a file: $file_path\n" ;
+		return 1 ;
+	}
+	my $filetype = match_name($file_path) ;
+	if( not defined $filetype )
+	{
+		print "Unknown file type: $file_path\n" ;
+		return 1 ;
+	}
+	my $parse_function = $filetype->[2] ;
+	if( not defined $parse_function )
+	{
+		print "No parse function for $file_path\n" ;
+		return 1 ;
+	}
+	my $archive_function = $filetype->[3] ;
+	if( not defined $archive_function )
+	{
+		print "No archive function for $file_path\n" ;
+		return 1 ;
+	}
+	my $parsed = $parse_function->($site,$file_path) ;
+	if( $archive_function->($site,$file_path,$parsed,$archive_root) )
+	{
+		print "Cannot archive $file_path at $archive_root\n" ;
+		showparsed($file_path,$parsed) ;
+		return 1 ;
+	}
+	return 0 ;
+}
+
+sub showparsed($$)
+{
+	my ( $file_path, $parsed ) = @_ ;
+	print "Parsed values for $file_path:\n" ;
+	my @keys = ( keys %$parsed ) ;
+	if( scalar @keys == 0 )
+	{
+		print "none!\n" ;
+	}
+	foreach my $key ( sort @keys )
+	{
+		my $value = $parsed->{$key} ;
+		if( not defined $value ) { $value = "" ; }
+		print "$key: $value\n" ;
+	}
+}
+
+sub match_name($)
+{
+	my ( $file_path ) = @_ ;
+	foreach my $row ( @FileList )
+	{
+		my $name = $row->[0] ;
+		my $pattern = $row->[1] ;
+		if( $file_path =~ $pattern )
+		{
+			#print "File $file_path is type $name\n" ;
+			return $row ;
+		}
+	}
+	return undef ;
+}
+
+sub mkdirp($)	# create directory path using mkdir with -p flag
+{
+	my ( $path ) = @_ ;
+	my $command = "mkdir -p \"$path\"" ;
+	my $result = `$command` ;
+	my $err = $? ;
+	if( $err )
+	{
+		print "Error creating $path\n" ;
+		print "$result\n" ;
+		return 1 ;
+	}
+	if( ! -d $path )
+	{
+		print "Missing path: $path\n" ;
+		return 1 ;
+	}
+	return 0 ;
+}
+
+sub cpfile($$)	# copy from source file to destination directory with -p flag (copy metadata)
+{
+	my ( $source, $destination ) = @_ ;	# 
+	my $filename = basename($source) ;
+	if( (not defined $filename) or ($filename eq "") )
+	{
+		print "Filename missing from $source\n" ;
+		return 1 ;
+	}
+	my $destinationfile = "$destination/$filename" ;
+	while( -e $destinationfile )
+	{
+		# file exists, dupecheck
+		my $md5_s = getmd5($source) ;
+		my $md5_d = getmd5($destinationfile) ;
+		if( (not defined $md5_s) || ($md5_s eq "") )
+		{
+			print "Can\'t get md5 for $source\n" ;
+			return 1 ;
+		}
+		if( (not defined $md5_d) || ($md5_d eq "") )
+		{
+			print "Can\'t get md5 for $destinationfile\n" ;
+			return 1 ;
+		}
+		if( $md5_s eq $md5_d )
+		{
+			print "$source\t\tdup of\t\t$destinationfile\t$md5_s $md5_d\n" ;
+			return 0 ;				# we're done
+		}
+		$destinationfile .= "_" ;			# rename new file and retry
+	}
+	my $command = "cp -p \"$source\" \"$destinationfile\"" ;
+	my $result = `$command` ;
+	my $err = $? ;
+	if( $err )
+	{
+		print "Error copying file $source to $destinationfile\n" ;
+		print "$result\n" ;
+		return 1 ;
+	}
+	if( ! -f $destinationfile )
+	{
+		print "Missing file: $destinationfile\n" ;
+		return 1 ;
+	}
+	print "$source\t\tcopied to\t\t$destinationfile\n" ;
+	return 0 ;
+}
+
+sub getmd5($)
+{
+	my ( $filename ) = @_ ;
+	my $command = "md5 -q \"$filename\"" ;
+	my $md5 = `$command` ;
+	chomp($md5) ;
+	return $md5 ;
+}
+
+sub diff($$)
+{
+	my ( $file1, $file2 ) = @_ ;
+	my $command = "diff \"$file1\" \"$file2\"" ;
+	my $result = `$command` ;
+	if( length($result) < 1 )
+	{
+		#print "debug: found $file1 and $file2 to be identical\n" ;
+		return 0 ;
+	}
+	#print "debug: found $file1 and $file2 to be different\n" ;
+	return 1 ;
+}
+
+sub metadata_mtime($)	# roots out the file modification date from OSX metadata, requires mdls
+{
+	my ( $filename ) = @_ ;
+	my $attribute = "kMDItemContentModificationDate" ;
+	my $command = "mdls -name $attribute \"$filename\"" ;
+	my $result = `$command` ;
+	#print "debug: command='$command' result='$result'\n" ;
+	my @lines = split /\n/,$result ;
+	my $pattern = '^'.$attribute.'\s=\s(.+)$' ;
+	my $datestring = "" ;
+	foreach my $line ( @lines )
+	{
+		chomp($line) ;
+		if( $line =~ m/$pattern/ )
+		{
+			$datestring = $1 ;
+			return $datestring ;
+		}
+	}
+	return undef ;
+}
+
+sub normal_mtime($)	# reads the file modification date from the directory, as per normal
+{
+	my ( $filename ) = @_ ;
+	my @stats = stat($filename) ;
+	my $mtime = $stats[9] ;
+	my @tm = gmtime($mtime) ;
+	my $year = $tm[5]+1900 ;
+	my $month = $tm[4]+1 ;
+	my $day = $tm[3] ;
+	my $hour = $tm[2] ;
+	my $minute = $tm[1] ;
+	my $second = $tm[0] ;
+	my $datestring = sprintf("%d-%02d-%02d %02d:%02d:%02d +0000",$year,$month,$day,$hour,$minute,$second) ;
+	#print "debug: mtime='$mtime' result='$datestring'\n" ;
+	return $datestring ;
+}
+
+
+# Here follow the functions that are specific to each file type, called through the reference table FileList
+
+sub parse_rangeseries($$)
+{
+	my ( $site, $file_path ) = @_ ;
+	# .../Rng_SITE_2012_01_18_135302.rs
+	my $regex = '.+/Rng_'.$site.'_(\d{4})_(\d{2})_(\d{2})_(\d{6})\.rs' ;
+	if( $file_path !~ m/$regex/ )
+	{
+		print "Error parsing file path for range series file $file_path\n" ;
+		return undef ;
+	}
+	my %parts = () ;
+	$parts{"year"} = $1 ;
+	$parts{"month"} = $2 ;
+	$parts{"day"} = $3 ;
+	$parts{"time"} = $4 ;
+	return \%parts ;
+}
+
+sub archive_rangeseries($$$$)
+{
+	my ( $site, $file_path, $parsed, $archive_root ) = @_ ;
+	my $year = $parsed->{"year"} ;
+	my $month = $parsed->{"month"} ;
+	my $day = $parsed->{"day"} ;
+	my $archive_path = "$archive_root/$site/RangeSeries/$year/$month/$day" ;
+	if( mkdirp($archive_path) )
+	{
+		return 1 ;
+	}
+	if( cpfile($file_path,$archive_path) )
+	{
+		return 1 ;
+	}
+	return 0 ;
+}
+
+sub parse_general($$)
+{
+	my ( $site, $file_path ) = @_ ;
+	my $mdate = metadata_mtime($file_path) ;	# e.g.: 2008-04-24 18:17:08 +000
+	if( (not defined $mdate) || ($mdate eq "") || (length($mdate) < 19) )
+	{
+		$mdate = normal_mtime($file_path) ;
+		if( (not defined $mdate) || ($mdate eq "") || (length($mdate) < 19) )
+		{
+			print "Missing modification date for '$file_path'\n" ;
+			return undef ;
+		}
+	}
+	my $regex = '(\d{4})-(\d{2})-(\d{2})\s.+' ;
+	if( $mdate !~ m/$regex/ )
+	{
+		print "Error parsing modification date for $file_path\n" ;
+		return undef ;
+	}
+	my %parts = () ;
+	$parts{"year"} = "$1" ;
+	$parts{"month"} = "$2" ;
+	$parts{"day"} = "$3" ;
+	return \%parts ;
+}
+
+sub archive_config($$$$$)	# A general function to archive a config file to a subdirectory of SortDir
+{
+	my ( $site, $file_path, $parsed, $archive_root, $dirname ) = @_ ;
+	my $year = $parsed->{"year"} ;
+	my $month = $parsed->{"month"} ;
+	my $day = $parsed->{"day"} ;
+	if( (not defined $year) || ($year eq "") || ($year == 0) )
+	{
+		print "Cannot parse year for '$file_path'\n" ;
+		return 1 ;
+	}
+	if( (not defined $month) || ($month eq "") || ($month == 0) )
+	{
+		print "Cannot parse month for '$file_path'\n" ;
+		return 1 ;
+	}
+	if( (not defined $day) || ($day eq "") || ($day == 0) )
+	{
+		print "Cannot parse day for '$file_path'\n" ;
+		return 1 ;
+	}
+	my $archive_path = "$archive_root/${site}/$SortDir/${dirname}_${year}_${month}_${day}" ;
+	if( mkdirp($archive_path) )
+	{
+		return 1 ;
+	}
+	if( cpfile($file_path,$archive_path) )
+	{
+		return 1 ;
+	}
+	return 0 ;
+}
+
+sub parse_analysisoptions($$)
+{
+	my ( $site, $file_path ) = @_ ;
+	return parse_general($site,$file_path) ;
+}
+
+sub archive_analysisoptions($$$$)
+{
+	my ( $site, $file_path, $parsed, $archive_root ) = @_ ;
+	return archive_config($site,$file_path,$parsed,$archive_root,"AnalysisOptions") ;
+}
+
+sub parse_phases($$)
+{
+	my ( $site, $file_path ) = @_ ;
+	return parse_general($site,$file_path) ;
+}
+
+sub archive_phases($$$$)
+{
+	my ( $site, $file_path, $parsed, $archive_root ) = @_ ;
+	return archive_config($site,$file_path,$parsed,$archive_root,"Phases") ;
+}
+
+sub parse_header($$)
+{
+	my ( $site, $file_path ) = @_ ;
+	return parse_general($site,$file_path) ;
+}
+
+sub archive_header($$$$)
+{
+	my ( $site, $file_path, $parsed, $archive_root ) = @_ ;
+	return archive_config($site,$file_path,$parsed,$archive_root,"Header") ;
+}
+
+sub parse_measpattern($$)
+{
+	my ( $site, $file_path ) = @_ ;
+	return parse_general($site,$file_path) ;
+}
+
+sub archive_measpattern($$$$)
+{
+	my ( $site, $file_path, $parsed, $archive_root ) = @_ ;
+	return archive_config($site,$file_path,$parsed,$archive_root,"MeasPattern") ;
+}
+
+sub parse_sitelog($$)
+{
+	my ( $site, $file_path ) = @_ ;
+	return parse_general($site,$file_path) ;
+}
+
+sub archive_sitelog($$$$)
+{
+	my ( $site, $file_path, $parsed, $archive_root ) = @_ ;
+	return archive_config($site,$file_path,$parsed,$archive_root,"SiteLog") ;
+}
+
+sub parse_ssaplist($$)
+{
+	my ( $site, $file_path ) = @_ ;
+	return parse_general($site,$file_path) ;
+}
+
+sub archive_ssaplist($$$$)
+{
+	my ( $site, $file_path, $parsed, $archive_root ) = @_ ;
+	return archive_config($site,$file_path,$parsed,$archive_root,"SeaSondeAcquisition") ;
+}
+
+sub parse_sscplist($$)
+{
+	my ( $site, $file_path ) = @_ ;
+	return parse_general($site,$file_path) ;
+}
+
+sub archive_sscplist($$$$)
+{
+	my ( $site, $file_path, $parsed, $archive_root ) = @_ ;
+	return archive_config($site,$file_path,$parsed,$archive_root,"SeaSondeController") ;
+}
+
+
+exit main ;
+#END

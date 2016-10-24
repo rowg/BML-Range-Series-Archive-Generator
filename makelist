@@ -1,0 +1,83 @@
+#!/bin/bash
+#makelist
+
+#
+# This shell script creates a file called filelist_SITE containing all the files
+# that consititute a range series archive for a given radial SITE.
+# It should be run as the first step in generating an RS archive.
+#
+# BML ML 2016 08 08
+
+# The list of all volumes to search for files
+
+volumes=( 'MicroNetRAID1/Part1' 'MicroNetRAID2/Part2' 'DataStorage_4TB/All' 'RAID_COPY_2014_2015/All' )
+# TESTING, just this one
+volumes=( 'MicroNetRAID2 1/2009_2011/2009_2010Data' )
+
+# The list of site names to allow/search
+sites=( PREY BML1 BMLR GCVE PAFS BRAG SHEL TRIN )
+
+# The list of files to search for
+# Rng*.rs AnalysisOptions.txt Phases.txt Header.txt MeasPattern.txt Site_*.log SeaSondeAcquisition.plist SeaSondeController.plist
+filenames=( 'Rng*.rs' 'AnalysisOptions.txt' 'Phases.txt' 'Header.txt' 'MeasPattern.txt' 'Site_*.log' 'SeaSondeAcquisition.plist' 'SeaSondeController.plist' )
+# During TESTING omit the range series files
+# Comment out the following line to disable testing
+#filenames=( 'AnalysisOptions.txt' 'Phases.txt' 'Header.txt' 'MeasPattern.txt' 'Site_*.log' 'SeaSondeAcquisition.plist' 'SeaSondeController.plist' )
+
+if [ "$2" == "" ]
+then
+	echo Usage: $0 'Volume{,Volume} SITE{,SITE}'
+	echo Creates a list of all range series files including configuration files found
+	echo under Volume/SITE/ for all volumes and sites given
+	exit 1
+fi
+#volumes=(${1//,/ })
+#sites=(${2//,/ })
+#echo Volumes: ${volumes[@]}
+#echo Sites: ${sites[@]}
+volumes=$1
+sites=$2
+echo Volumes: $volumes
+echo Sites: $sites
+errors=0
+echo -n >logfile
+echo `date` >>logfile
+previousIFS=$IFS
+IFS=','
+for site in $sites
+do
+	echo "Site $site"
+	filelist="filelist_$site"
+	echo "Filelist $filelist"
+	echo -n >$filelist
+	#for volume in "${volumes[@]}"
+	IFS=','
+	for volume in $volumes
+	do
+		echo "Volume $volume"
+		path="$volume/$site"
+		if [ ! -e "$path" ]
+		then
+			echo ; echo "ERROR: cannot find $path" ; echo
+			echo "Cannot find $path" >>logfile
+			errors=1
+			continue
+		fi
+		for filename in "${filenames[@]}"
+		do
+			echo "Filename $filename"
+			find "$path" -iname $filename >>$filelist
+			count=`cat $filelist | wc -l`
+			echo "Total of $count files so far"
+		done
+	done
+done
+IFS=$previousIFS
+
+if [ $errors -ne 0 ]
+then
+	echo "Errors:"
+	cat logfile
+fi
+
+#END

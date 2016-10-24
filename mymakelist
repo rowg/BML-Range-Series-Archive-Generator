@@ -1,0 +1,39 @@
+#!/bin/bash
+#mymakelist
+
+# This script runs a bulk search for range series files on many radial archive volumes for many sites.
+# It calls makelist with a list of volume names and site names to search.
+# It assumes that your radial archive volumes are organized as volume1/site1, volume1/site2, volume2/site1, etc.
+# If you specify volume/site combinations that do not exist, the script will warn you but not fail.
+# If you have a very odd structure you might be better off making your own bulk search script if you need one.
+# This would look like this:
+#	./makelist volume1 site1
+#	./makelist volume2 site2
+#	etc
+
+# To locate all ocurrences of a subdirectory called SITE, use this command:
+#	find /Volumes -type d -name SITE
+
+# 1. Specify the list of volume names to search.
+# Each volume name is the entire path up to and *excluding* the site name.
+# Normally each volume is mounted under /Volumes, so the volume name begins with /Volumes,
+# but you can use any mount point and provide either an absolute or a relative path.
+# Volume names may contain spaces, that's dealt with in makelist.
+# Volume names must be separated by a single comma only.
+volumes="/Volumes/MicroNetRAID1/Part1,/Volumes/MicroNetRAID2/Part2,/Volumes/DataStorage_4TB/All,/Volumes/RAID_COPY_2014_2015/All"
+# If testing, you can reassign the volumes variable to just one volume.
+#volumes="/Volumes/MicroNetRAID2 1/Part2"
+
+# 2. Specify the list of site names to search.
+# Each site name is concatenated with each volume name to create a search path, i.e. volume1/site1, volume1/site2, etc.
+sites="PREY,BML1,BMLR,GCVE,PAFS,BRAG,SHEL,TRIN"
+# Again, for testing, just reassign the sites variable to one site name.
+sites="BRAG"
+
+echo volumes="$volumes"
+echo sites="$sites"
+
+# Now actually run makelist with a list of volumes and a list of sites.
+./makelist "$volumes" "$sites"
+
+#END
