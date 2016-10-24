@@ -1,8 +1,10 @@
-Here's how to create an archive of rangeseries data.
+# BML-RangeSeries-Archive-Generator
 
-1.	Create a list of all files that need to go into the archive.
+These scripts help to create an archive of rangeseries data.
 
-./makelist volume site
+1	Create a list of all files that need to go into the archive.
+
+`./makelist volume site`
 
 The makelist script searches for all relevant range series and configuration files.
 	volume is the path to a radial site archive
@@ -16,9 +18,9 @@ To change the list of relevant files, edit the makelist script.
 The site name is used to match range series filenames and to name the output file: filelist_site.
 You may check and edit the filelist, primarily to remove files you dont want to archive before the next step.
 
-2.	Build an archive from a filelist.
+2	Build an archive from a filelist.
 
-./runlist site archive filelist
+`./runlist site archive filelist`
 
 The runlist script builds or extends an archive directory with files listed in filelist.
 	site is the four letter site code used in filenames.
@@ -35,17 +37,17 @@ from the directory entry.
 
 If you are not interested in the configuration files, simply delete the sortdir subdirectory and you're done.
 
-3.	Regroup config files.
+3	Regroup config files.
 
-./regroup archive
+`./regroup archive`
 
 The regroup script examines all configuration files within the 'sortdir' subdirectory and builds new subdirectories
 under the 'Configs' subdirectory according to their modification dates. Each Configs subdirectory contains all
 configuration files for a given date range, to simplify reprocessing.
 
-4.	Clean up.
+4	Clean up.
 
-./cleanup archive
+`./cleanup archive`
 
 Shows file count data for the given archive and deletes the sortdir subdirectory.
 
@@ -55,12 +57,10 @@ TODO
 1. There are several minor issues related to regrouping configuration files that need to be fixed at specification level.
 For example, currently any change to any config file triggers a new Configs subdirectory, sometimes not justified.
 A better approach is needed to ignore insignificant changes to config files.
-
 2. The current regroup script has an issue in that it uses only the files under sortme and ignores those under Configs.
 This makes is potentially bad at updating an archive that has already been regrouped, i.e. it might create more
 Configs subdirectories than it needs to.
-
 3. Currently all files involved in processing an APM are ignored.
 
 
-#END
+END
